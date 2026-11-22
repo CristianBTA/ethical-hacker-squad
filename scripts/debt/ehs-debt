@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Wrapper for scripts/debt/ehs_debt.py. -I: never import a module from the audited tree.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 -I "$HERE/ehs_debt.py" "$@"
