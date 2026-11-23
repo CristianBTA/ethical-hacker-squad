@@ -296,11 +296,24 @@ else
       # bullets; counting those made a newer CLI fail a tree an older one
       # passed, which is why this gate's self-test was red on every laptop
       # with a current CLI and green in CI, where no CLI ran at all.
+      # Newer CLIs print more sections around the verdict: "Found N plugin
+      # directory warning(s)" and "About these checks" (2.1.319, which states they
+      # "do not change the result below"; measured: ICON_MISSING on this plugin),
+      # and "Provides:" / "Hosts not ..." (2.1.330, an inventory). So the rule is
+      # positive rather than a list of exceptions: a bullet counts only inside a
+      # manifest "Found N warning|error" section, and any other unindented line
+      # closes it. Directory warnings are reported as info, never counted.
       counted=$(awk '
-        /Found [0-9]+ (warning|error)/ { mode = 1; next }
-        /Advice/                       { mode = 0; next }
-        mode && /❯ /                   { print }
+        /^[^ \t]/ { mode = ($0 ~ /Found [0-9]+ (warning|error)/ && $0 !~ /plugin directory/) ? 1 : 0; next }
+        mode && /❯ / { print }
       ' <<<"$out")
+      directory=$(awk '
+        /^[^ \t]/ { d = ($0 ~ /plugin directory (warning|error)/) ? 1 : 0; next }
+        d && /❯ /  { sub(/^ *❯ */, ""); print }
+      ' <<<"$out")
+      if [[ -n "$directory" ]]; then
+        while IFS= read -r line; do info "plugin directory (does not change the verdict): ${line:0:160}"; done <<<"$directory"
+      fi
       n_warn=$(grep -c '❯ ' <<<"$counted")
       n_expected=$(grep -c "❯ .*$EXPECTED_WARN" <<<"$counted")
       if (( n_warn > 0 && n_warn == n_expected )) && ! grep -q 'Found .* error' <<<"$out"; then
