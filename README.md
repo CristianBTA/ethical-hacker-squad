@@ -134,6 +134,18 @@ Every finding comes back with an ID, the procedure that produced it, status (con
 
 The machine-readable half, `findings.json`, can be exported for GitHub code scanning with `scripts/ehs sarif findings.json -o ehs.sarif`. Writing the file is local; uploading it is a separate decision. See [`findings-artifact.md`](skills/ethical-hacker-squad/references/findings-artifact.md#exporting-it-to-github-code-scanning).
 
+### Keep the debt found, and know when it comes back
+
+```
+scripts/ehs debt scan ./my-app              # deterministic probes, no model, nothing sent anywhere
+scripts/ehs debt scan ./my-app --ledger     # record it in ./my-app/.ehs/debt.json
+scripts/ehs debt status ./my-app            # open, closed, regression_detected, and what could not be checked
+```
+
+Small static probes for the debt AI-assisted apps leave most often (BaaS rules that let anyone write, provider secrets in server or client code, fast password hashes, unverified JWTs, weak randomness for codes, broken encryption, agent/MCP configs, unlocked dependencies, debug and CORS, credentials in logs, TLS verification off, SQL built from interpolated values). Each probe was kept only if it cleared a precision bar fixed before measuring, judged blind on corpora written by agents that never saw the probes; four first versions were discarded and three later rules dropped on the way. The numbers, the discards and what the probes miss are in [`docs/vibe-debt-next-step.md`](docs/vibe-debt-next-step.md). `closed` means the probe no longer sees it, never that it is verified fixed.
+
+It audits only a local checkout you own, never prints a secret or a row of data, and its one network probe needs an ownership attestation: see [`docs/acceptable-use.md`](docs/acceptable-use.md).
+
 ## How it stays current
 
 Not automatically, today. A knowledge loop — a daily check of the pinned sources and a weekly review of a slice of the corpus, each opening a pull request — is designed in [`docs/knowledge-loop.md`](docs/knowledge-loop.md), including its threat model: a poisoned source would become an instruction inside the security agent of everyone who installed the plugin. **No workflow runs it yet.** What does run: the gates on every pull request, and scheduled checks for supply-chain hygiene, OpenSSF Scorecard, repository-protection and label drift, and the freshness of the competitive baseline. Corpus changes today are made by hand, through pull requests, against primary sources.

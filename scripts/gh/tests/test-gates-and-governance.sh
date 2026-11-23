@@ -48,8 +48,11 @@ echo 'not json at all' >"$SP/bad.json"
 "$G" --made-up-flag >/dev/null 2>&1; res "unknown argument -> rc 2" "$?" 2
 
 # without jq on the PATH: I cannot compare -> rc 2, never 0
+# Only jq may be missing. `dirname` was missing too, and on bash 5 (the Linux runners) the script's
+# `cd -- "$(dirname ...)"` then aborts under `set -e` with rc 1 before the jq precondition is ever
+# read; bash 3.2 on macOS carried on, so the case passed on a laptop and failed in CI.
 FB="$SP/fakebin2"; mkdir -p "$FB"
-for t in gh git bash sed grep find sort mktemp rm cat tr printf date; do
+for t in gh git bash sed grep find sort mktemp rm cat tr printf date dirname; do
   p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$FB/$t" 2>/dev/null || true
 done
 env PATH="$FB" "$G" >/dev/null 2>&1; res "no jq on the PATH -> rc 2" "$?" 2
