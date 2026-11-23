@@ -81,9 +81,7 @@ MAX_FILES = 20000
 
 # Procedures in skills/ethical-hacker-squad/references/knowledge that explain each class.
 CLASSES = {
-    "DEBT-01": ("BaaS access rules missing or open (Supabase RLS, Firebase rules)", "WEB-04"),
     "DEBT-02": ("Secret reachable from client-side code", "MOB-12"),
-    "DEBT-03": ("Secret hard-coded in the source", "SUP-16"),
     "DEBT-04": ("Password stored with a fast hash or in clear", "WEB-19"),
     "DEBT-05": ("JWT accepted without real verification, or signed with a guessable secret", "WEB-01"),
     "DEBT-06": ("Security token generated with a non-cryptographic random", "WEB-19"),
@@ -93,7 +91,6 @@ CLASSES = {
     "DEBT-10": ("Debug mode or wildcard CORS with credentials", "WEB-16"),
     "DEBT-11": ("Credentials or tokens written to logs", "PRV-09"),
     "DEBT-12": ("TLS certificate verification turned off", "WEB-19"),
-    "DEBT-13": ("SQL built by string interpolation", "WEB-07"),
     "DEBT-N1": ("Supabase table readable with the public anon key (network, opt-in)", "WEB-04"),
 }
 
@@ -275,7 +272,9 @@ def probe_secrets(ctx: Ctx, rel: str, text: str, out: List[dict]) -> None:
         seen.add(value)
         if is_test:
             return  # planted values in tests are the test's business; SUP-16 covers history
-        cls, sev = ("DEBT-02", "high") if client else ("DEBT-03", "medium" if generic else "high")
+        if not client:
+            return  # DEBT-03 (secret anywhere in the source) was DISCARDED on 2026-11-22: precision 0.67
+        cls, sev = "DEBT-02", "high"
         out.append(finding(cls, sev, rel, line_of(text, pos),
                            f"{kind} {redact(value)}" + (" in client-side code" if client else ""),
                            fingerprint(value)))
@@ -316,68 +315,8 @@ def probe_secrets(ctx: Ctx, rel: str, text: str, out: List[dict]) -> None:
 
 
 # --------------------------------------------------------------------------- BaaS rules
-
-SQL_CREATE = re.compile(r"create\s+table\s+(?:if\s+not\s+exists\s+)?(?:(public)\.|\"?([a-z_]+)\"?\.)?\"?([a-z_][a-z0-9_]*)\"?",
-                        re.I)
-SQL_RLS = re.compile(r"alter\s+table\s+(?:if\s+exists\s+)?(?:\"?public\"?\.)?\"?([a-z_][a-z0-9_]*)\"?\s+enable\s+row\s+level\s+security",
-                     re.I)
-SQL_POLICY_TRUE = re.compile(
-    r"create\s+policy\s+[\"']?([^\"'\n]+?)[\"']?\s+on\s+(?:\"?public\"?\.)?\"?([a-z_][a-z0-9_]*)\"?"
-    r"(?P<body>[^;]*?)(?:using|with\s+check)\s*\(\s*true\s*\)[^;]*;", re.I | re.S)
-SQL_GRANT_ANON = re.compile(r"grant\s+(?:all|insert|update|delete)[^;]*\bon\s+(?:table\s+)?[^;]*\bto\s+[^;]*\banon\b", re.I)
-
-
-def probe_sql(rel: str, text: str, out: List[dict], rls_tables: set, created: Dict[str, Tuple[str, int]]) -> None:
-    for m in SQL_CREATE.finditer(text):
-        schema = (m.group(1) or m.group(2) or "public").lower()
-        if schema != "public":
-            continue
-        created.setdefault(m.group(3).lower(), (rel, line_of(text, m.start())))
-    for m in SQL_RLS.finditer(text):
-        rls_tables.add(m.group(1).lower())
-    for m in SQL_POLICY_TRUE.finditer(text):
-        body = m.group("body").lower()
-        cmd = re.search(r"\bfor\s+(select|insert|update|delete|all)\b", body)
-        what = cmd.group(1) if cmd else "all"
-        if what == "select" and re.search(r"\bto\s+authenticated\b", body):
-            continue  # every signed-in user reading every row may be the design; it needs the data model
-        sev = "low" if what == "select" else "high"
-        out.append(finding("DEBT-01", sev, rel, line_of(text, m.start()),
-                           f"policy '{m.group(1).strip()[:40]}' on {m.group(2)} allows {what.upper()} for any row (using/with check true)"
-                           + (" - fine only if the table is meant to be public" if sev == "low" else ""),
-                           f"policy:{m.group(2)}:{m.group(1).strip()}"))
-    for m in SQL_GRANT_ANON.finditer(text):
-        out.append(finding("DEBT-01", "medium", rel, line_of(text, m.start()),
-                           "write privilege granted to the anon role", f"grant:{m.group(0)[:60]}"))
-
-
-FB_OPEN = [
-    (re.compile(r"allow\s+(?:read\s*,\s*write|write\s*,\s*read|write|create|update|delete)\s*:\s*if\s+true\s*;", re.I), "if true"),
-    (re.compile(r"allow\s+(?:read\s*,\s*write|write\s*,\s*read|write)\s*;", re.I), "no condition"),
-    (re.compile(r"allow\s+(?:read\s*,\s*write|write)\s*:\s*if\s+request\.time\s*<\s*timestamp", re.I), "test-mode expiry"),
-]
-RTDB_OPEN = re.compile(r"\"\.(read|write)\"\s*:\s*(true|\"true\")")
-
-
-def probe_firebase(rel: str, text: str, out: List[dict]) -> None:
-    name = Path(rel).name.lower()
-    if name.endswith(".rules") or name in {"firestore.rules", "storage.rules"}:
-        for rx, why in FB_OPEN:
-            for m in rx.finditer(text):
-                if comment_line(text, m.start()):
-                    continue
-                out.append(finding("DEBT-01", "high", rel, line_of(text, m.start()),
-                                   f"Firebase rule opens access ({why})", f"fb:{m.group(0)}:{line_of(text, m.start())}"))
-    if name.endswith(".rules"):
-        for m in re.finditer(r"allow\s+(?:read|get|list)\s*:\s*if\s+true\s*;", text, re.I):
-            out.append(finding("DEBT-01", "low", rel, line_of(text, m.start()),
-                               "Firebase rule lets anyone read - fine only if the data is meant to be public",
-                               f"fbread:{line_of(text, m.start())}"))
-    if name in {"database.rules.json"}:
-        for m in RTDB_OPEN.finditer(text):
-            out.append(finding("DEBT-01", "high" if m.group(1) == "write" else "low", rel, line_of(text, m.start()),
-                               f"Realtime Database rule \".{m.group(1)}\": true", f"rtdb:{m.group(1)}:{line_of(text, m.start())}"))
-
+# DEBT-01 (Supabase RLS / Firebase rules, static) was DISCARDED on 2026-11-22: precision 0.60 on the
+# sealed corpus. See docs/vibe-debt-next-step.md. The opt-in network probe DEBT-N1 is separate.
 
 # --------------------------------------------------------------------------- code patterns
 
@@ -418,10 +357,6 @@ CODE_PROBES: List[Tuple[str, str, re.Pattern, str]] = [
     ("DEBT-12", "high", _rx(r"rejectUnauthorized\s*:\s*false", 0), "TLS client accepts any certificate"),
     ("DEBT-12", "high", _rx(r"NODE_TLS_REJECT_UNAUTHORIZED\s*=?\s*['\"]?0", 0), "TLS verification disabled for the whole process"),
     ("DEBT-12", "high", _rx(r"ssl\._create_unverified_context|CERT_NONE", 0), "unverified TLS context"),
-    # DEBT-13 SQL by interpolation
-    ("DEBT-13", "high", _rx(r"\.(execute|executemany|raw|query)\(\s*f['\"][^'\"]*\b(select|insert|update|delete)\b[^'\"]*\{", re.I), "SQL built with an f-string"),
-    ("DEBT-13", "high", _rx(r"\.(execute|query|raw)\(\s*['\"][^'\"]*\b(select|insert|update|delete)\b[^'\"]*['\"]\s*(%\s*[\w(]|\+\s*\w|\.format\()", re.I), "SQL built by concatenation or % formatting"),
-    ("DEBT-13", "high", _rx(r"\.(query|execute|raw|unsafe)\(\s*`[^`]*\b(select|insert|update|delete)\b[^`]*\$\{", re.I), "SQL built with a template literal"),
 ]
 
 
@@ -550,9 +485,7 @@ def scan(root: Path) -> Tuple[List[dict], Dict[str, str]]:
     ctx = Ctx(root)
     out: List[dict] = []
     ran = set()
-    rls_tables: set = set()
-    created: Dict[str, Tuple[str, int]] = {}
-    saw = {"sql": False, "fb": False, "agent": False, "supabase": False}
+    saw = {"agent": False}
     ignored = ignored_files(root)
     for fp in iter_files(root):
         rel = ctx.rel(fp)
@@ -562,31 +495,15 @@ def scan(root: Path) -> Tuple[List[dict], Dict[str, str]]:
             text = fp.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if not saw["supabase"] and re.search(r"supabase", text, re.I):
-            saw["supabase"] = True
         probe_secrets(ctx, rel, text, out)
         probe_code(rel, text, out)
-        if fp.suffix.lower() == ".sql":
-            saw["sql"] = True
-            probe_sql(rel, text, out, rls_tables, created)
-        if fp.name.lower().endswith(".rules") or fp.name.lower() == "database.rules.json":
-            saw["fb"] = True
-            probe_firebase(rel, text, out)
         if AGENT_CONFIG.search(rel):
             saw["agent"] = True
             probe_agent_config(rel, text, out)
-    for table, (rel, line) in sorted(created.items()):
-        # RLS is how Supabase lets the browser talk to the database; a plain server-side
-        # Postgres or SQLite schema has no such door and no such debt
-        if saw["supabase"] and table not in rls_tables:
-            out.append(finding("DEBT-01", "high", rel, line,
-                               f"public table '{table}' is created and row level security is never enabled", f"norls:{table}"))
     probe_deps(ctx, out, ran)
     coverage = {}
     for cls in CLASSES:
         coverage[cls] = "ran"
-    if not (saw["sql"] or saw["fb"]):
-        coverage["DEBT-01"] = "no input (no SQL migrations, no Firebase rules)"
     if not saw["agent"]:
         coverage["DEBT-08"] = "no input (no agent configuration file)"
     if "DEBT-09" not in ran:

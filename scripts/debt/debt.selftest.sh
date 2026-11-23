@@ -91,7 +91,7 @@ echo "=== self-test: ehs debt ==="
 VOUT="$("$DEBT" scan "$W/vuln" --format json 2>&1)"; vrc=$?
 SOUT="$("$DEBT" scan "$W/safe" --format json 2>&1)"; src=$?
 [ "$vrc" -eq 1 ] && ok "vulnerable app exits 1" || bad "vulnerable app exits 1 (rc=$vrc)" "$VOUT"
-for c in DEBT-01 DEBT-02 DEBT-03 DEBT-04 DEBT-05 DEBT-06 DEBT-07 DEBT-08 DEBT-09 DEBT-10 DEBT-11 DEBT-12 DEBT-13; do
+for c in DEBT-02 DEBT-04 DEBT-05 DEBT-06 DEBT-07 DEBT-08 DEBT-09 DEBT-10 DEBT-11 DEBT-12; do
   n="$(printf '%s' "$VOUT" | python3 -c "import json,sys;print(sum(f['class']=='$c' for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
   m="$(printf '%s' "$SOUT" | python3 -c "import json,sys;print(sum(f['class']=='$c' and f['severity']!='low' for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
   [ "$n" != ERR ] && [ "$n" -ge 1 ] && ok "$c fires on the vulnerable fixture ($n)" || bad "$c fires on the vulnerable fixture ($n)"
@@ -117,6 +117,10 @@ done
 ln -s /etc "$W/vuln/escape" 2>/dev/null
 "$DEBT" scan "$W/vuln" --format json 2>/dev/null | grep -q '"file": "escape/' \
   && bad "a symlink out of the target was followed" || ok "a symlink out of the target is not followed"
+
+# discarded probes stay discarded (2026-11-22): nothing of DEBT-01, DEBT-03 or DEBT-13 is ever emitted
+gone="$(printf '%s' "$VOUT" | python3 -c "import json,sys;print(sum(f['class'] in ('DEBT-01','DEBT-03','DEBT-13') for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
+[ "$gone" = 0 ] && ok "discarded probes emit nothing" || bad "discarded probes emit nothing ($gone)"
 
 # ledger: open -> closed -> regression_detected; an unrun probe closes nothing
 L="$W/led"; mkdir -p "$L/api"
