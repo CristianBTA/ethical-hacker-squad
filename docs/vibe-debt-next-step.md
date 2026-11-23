@@ -117,6 +117,15 @@ Keep rules: precision >= 0.80; zero findings of medium or high severity on any c
 
 Recall, for honesty about what it misses: 29 of 39 defects on corpus 2 and 32 of 43 on corpus 3 were found by some probe. Missed on corpus 3: all three SQL injections (Go `Sprintf` with `'%%%s%%'`, a Laravel `whereRaw` fragment, Java concatenation after a `%`), three debug/CORS cases (gin debug mode, two handlers reflecting an `origin` variable), two credentials in logs, one JWT, one unpinned dependency and one client secret. Many v3 rules have fixture evidence only; small numbers per probe (n = 1 to 21) are a band, not a ranking.
 
-### What this does not show
+### Does the ledger help a model close the debt? (proposal step 6, measured 2026-11-22)
 
-That a model with the ledger closes more debt than a model without it. That was proposal step 6 and it was not run: it costs model runs and it was not needed to decide what to keep, because nothing here changes what the plugin does. It is the next measurement, and the bar written in section 6 still applies.
+No, not by the bar written before the run. Pre-registered: the nine defective products of corpus 3 (43 sealed defects), each copied twice. Arm M got Sonnet with "fix the security debt" and edit tools only; arm L got the same plus the `ehs debt scan` report and permission to re-run it. One run per product per arm, no network, no MCP, no settings. Two blind Sonnet judges saw both diffs as X/Y (assigned at random per product) against the sealed key, and a defect counted closed only if both said so (they disagreed on 2 of 86 labels).
+
+| arm | closed | closed or partial | diffs that broke something | cost (list) |
+|---|---|---|---|---|
+| model alone | 35/43 (81.4 %) | 37 | 0 of 9 | USD 1.27 |
+| model + ledger | 36/43 (83.7 %) | 40 | 0 of 9 | USD 1.34 (1.05x) |
+
+The bar was +5 points of closure at no more breakage and at most 1.2x the cost. The ledger arm is +2.3 points, one defect, inside the noise of nine single runs. **The result is that the report did not measurably help a frontier model fix this debt**, which agrees with what this project measured for detection: the model does most of it alone. What the probes add is what the model does not keep: a deterministic record across commits, `regression_detected` when a closed item returns, and output that is the same on every run at no model cost. Nothing in the plugin feeds the report to the model, so nothing had to be withdrawn; the README makes no claim about closing.
+
+Not measured: more runs per arm, a smaller model (where the corpus was once measured as harmful, then neutral), and whether the ledger catches regressions a model reintroduces later. The runs, diffs, blind packages, verdicts and the X/Y mapping are kept outside the repository with the other corpora.
