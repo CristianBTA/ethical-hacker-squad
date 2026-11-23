@@ -39,6 +39,9 @@ check "list-filter-by-pack" "$EHS list ai-safety" 0 "AI-01"
 check "show-valid-procedure" "$EHS show AI-08" 0 "Where to look"
 check "show-invalid-procedure" "$EHS show FAKE-99" 1 "not found"
 check "search-finds-mcp" "$EHS search mcp" 0 "AI-08"
+check "debt-refuses-remote-target" "$EHS debt scan https://example.org/repo.git" 2 "REFUSED"
+EMPTY="$(mktemp -d 2>/dev/null || mktemp -d -t ehsempty)"; trap 'rm -rf "$EMPTY"' EXIT
+check "debt-scans-local-dir" "$EHS debt scan $EMPTY" 0 "UNKNOWN"
 check "search-empty-returns-0" "$EHS search xyznonexistentquery123" 0 "No procedures found"
 
 # sarif: the conforming fixture has four findings, one of them a duplicate.

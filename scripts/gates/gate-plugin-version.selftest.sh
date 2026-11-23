@@ -52,6 +52,12 @@ fi
 case "${STUB_MODE:-}" in
   advice)
     printf '\nℹ Advice (does not change the verdict):\n\n  ❯ README.md: This README has no line that installs the plugin from a marketplace.\n' ;;
+  directory)
+    printf '\nPlugin directory checks for .\n\n⚠ Found 1 plugin directory warning:\n\n  ❯ .claude-plugin/plugin.json icon: No icon (ICON_MISSING).\n\nAbout these checks:\n\n  ❯ This folder also holds a marketplace manifest.\n\nThese plugin directory checks do not change the result below.\n'
+    printf '\nProvides:\n\n  ❯ skills: ethical-hacker-squad:ethical-hacker-squad\n  ❯ agents: ethical-hacker-squad:ehs-verifier\n\nHosts not read for: skills (1)\n' ;;
+  directory-then-warning)
+    printf '\n⚠ Found 1 plugin directory warning:\n\n  ❯ .claude-plugin/plugin.json icon: No icon (ICON_MISSING).\n\nValidating agent: agents/a.md\n\n⚠ Found 1 warning:\n\n  ❯ description: Too short.\n'
+    rc=1 ;;
   agent-error)
     printf '\nValidating agent: agents/a.md\n\n✘ Found 1 error:\n\n  ❯ frontmatter: YAML frontmatter failed to parse. At runtime this agent loads with empty metadata.\n'
     rc=1 ;;
@@ -157,6 +163,10 @@ echo "-- the official validator, read through a stub"
 run_case validator-advice-is-not-a-warning   0 "all expected"              latest m_served       ""
 export STUB_MODE=advice
 run_case validator-advice-section-tolerated  0 "all expected"              latest m_served       ""
+export STUB_MODE=directory
+run_case validator-directory-section-tolerated 0 "all expected"            latest m_served       ""
+export STUB_MODE=directory-then-warning
+run_case validator-warning-after-directory-fails 1 "failed over"           latest m_served       ""
 export STUB_MODE=agent-error
 run_case validator-agent-error-fails         1 "failed over"               latest m_served       ""
 unset STUB_MODE
