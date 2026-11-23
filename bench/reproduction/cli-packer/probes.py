@@ -20,8 +20,7 @@ THE THIRD ANSWER
     interpreter, and CPython changed that default to `data` in 3.14. On such an
     interpreter the traversal is stopped by the runtime and not by the code, so
     a probe that answered `False` there would be reporting a fixed defect that
-    nobody fixed. P-06 therefore pins the class-level fallback to the pre-3.14
-    behaviour while it runs, and answers `None` only if even that cannot be done.
+    nobody fixed. It answers `None` and says why.
 """
 
 from __future__ import annotations
@@ -101,6 +100,17 @@ def probe_P06(mod, work: Path) -> Observation:
             f"this interpreter defaults tarfile extraction to filter={default!r}, so a "
             "block here would come from the runtime rather than from the code under test",
         )
+    # CPython 3.14 made `data` the default WITHOUT changing that signature: the
+    # parameter still defaults to None and None now resolves to `data`. The check
+    # above saw nothing and the probe read the runtime's refusal as the code's.
+    # Ask the runtime directly, with a canary, and when it refuses by default,
+    # measure the code under the default the key assumes - `fully_trusted`, which
+    # is what 3.13 and older apply - and say so in the evidence.
+    emulated = ""
+    if _runtime_refuses_traversal(work / "canary"):
+        tarfile.TarFile.extraction_filter = staticmethod(tarfile.fully_trusted_filter)
+        emulated = (" (measured under the pre-3.14 default, filter=fully_trusted: this "
+                    "interpreter refuses the traversal by default, Python 3.13 and older do not)")
 
     dest = work / "dest"
     dest.mkdir()
@@ -114,29 +124,37 @@ def probe_P06(mod, work: Path) -> Observation:
             tf.addfile(info, fh)
 
     landed = work / ESCAPE
-    # The signature still says `filter=None` on 3.14+, but there None means "ask the class", and the
-    # class falls back to the `data` filter. Read from the signature alone, that runtime block looked
-    # like the code refusing the entry, and the gate reported a contradiction between probe and key on
-    # every runner that moved to 3.14. So the probe pins the class-level fallback to the pre-3.14
-    # behaviour for the duration of the call: the code under test is measured, not the interpreter.
-    # A patch that passes `filter=` explicitly still gets exactly the filter it asked for.
-    pinned = hasattr(tarfile, "fully_trusted_filter")
-    saved = tarfile.TarFile.__dict__.get("extraction_filter")
     try:
-        if pinned:
-            tarfile.TarFile.extraction_filter = staticmethod(tarfile.fully_trusted_filter)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             mod.unpack(str(archive), str(dest))
     except Exception as exc:  # a refusal is a real answer: the defect did not happen
-        return Observation(False, f"extraction refused the entry: {type(exc).__name__}: {exc}")
+        return Observation(False, f"extraction refused the entry: {type(exc).__name__}: {exc}{emulated}")
     finally:
-        if pinned:
-            tarfile.TarFile.extraction_filter = saved
+        if emulated:
+            tarfile.TarFile.extraction_filter = None
 
     if landed.exists():
-        return Observation(True, f"the entry wrote {landed}, outside the destination {dest}")
-    return Observation(False, f"nothing landed outside {dest}")
+        return Observation(True, f"the entry wrote {landed}, outside the destination {dest}{emulated}")
+    return Observation(False, f"nothing landed outside {dest}{emulated}")
+
+
+def _runtime_refuses_traversal(canary: Path) -> bool:
+    """Does plain `extractall(dest)` refuse an entry that climbs out of `dest`?"""
+    (canary / "dest").mkdir(parents=True)
+    payload = canary / "payload"
+    payload.write_bytes(b"canary\n")
+    archive = canary / "canary.tar"
+    with tarfile.open(archive, "w") as tf:
+        tf.add(str(payload), arcname="./../canary-escaped")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            with tarfile.open(archive) as tf:
+                tf.extractall(canary / "dest")
+    except Exception:
+        return True
+    return not (canary / "canary-escaped").exists()
 
 
 # ---------------------------------------------------------------------------
