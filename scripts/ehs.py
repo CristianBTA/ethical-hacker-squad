@@ -11,6 +11,7 @@ Usage:
   scripts/ehs.py stats
   scripts/ehs.py doctor
   scripts/ehs.py install [--antigravity] [--claude] [--all]
+  scripts/ehs.py debt scan|status|init <local-dir> ...   (see scripts/debt/ehs_debt.py)
 """
 
 from __future__ import annotations
@@ -312,6 +313,10 @@ def cmd_install(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    # `debt` owns its own arguments; hand them over untouched. -I: never import from the audited tree.
+    if len(sys.argv) > 1 and sys.argv[1] == "debt":
+        tool = Path(__file__).resolve().parent / "debt" / "ehs_debt.py"
+        return subprocess.call([sys.executable, "-I", str(tool), *sys.argv[2:]])
     parser = argparse.ArgumentParser(
         description="Ethical Hacker Squad CLI tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -335,6 +340,9 @@ def main() -> int:
 
     # doctor
     subparsers.add_parser("doctor", help="Run health diagnostics and quality gates")
+
+    # debt (dispatched before parsing; listed here so --help names it)
+    subparsers.add_parser("debt", help="Security-debt ledger for a local checkout you own: scan, status, init")
 
     # install
     p_install = subparsers.add_parser("install", help="Link/install skill for CLI environments")
