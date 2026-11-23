@@ -81,7 +81,9 @@ MAX_FILES = 20000
 
 # Procedures in skills/ethical-hacker-squad/references/knowledge that explain each class.
 CLASSES = {
+    "DEBT-01": ("BaaS lets anyone write, or every row is exposed (Supabase RLS, Firebase rules) - v2", "WEB-04"),
     "DEBT-02": ("Secret reachable from client-side code", "MOB-12"),
+    "DEBT-03": ("Provider secret hard-coded in server-side source - v2", "SUP-16"),
     "DEBT-04": ("Password stored with a fast hash or in clear", "WEB-19"),
     "DEBT-05": ("JWT accepted without real verification, or signed with a guessable secret", "WEB-01"),
     "DEBT-06": ("Security token generated with a non-cryptographic random", "WEB-19"),
@@ -273,8 +275,13 @@ def probe_secrets(ctx: Ctx, rel: str, text: str, out: List[dict]) -> None:
         if is_test:
             return  # planted values in tests are the test's business; SUP-16 covers history
         if not client:
-            return  # DEBT-03 (secret anywhere in the source) was DISCARDED on 2026-11-22: precision 0.67
-        cls, sev = "DEBT-02", "high"
+            # DEBT-03 v2: v1 (any name=literal anywhere) was DISCARDED on 2026-11-22 at 0.67, its false
+            # positives being public-by-design web config keys. v2 reports provider formats only.
+            if generic:
+                return
+            cls, sev = "DEBT-03", "high"
+        else:
+            cls, sev = "DEBT-02", "high"
         out.append(finding(cls, sev, rel, line_of(text, pos),
                            f"{kind} {redact(value)}" + (" in client-side code" if client else ""),
                            fingerprint(value)))
@@ -315,8 +322,67 @@ def probe_secrets(ctx: Ctx, rel: str, text: str, out: List[dict]) -> None:
 
 
 # --------------------------------------------------------------------------- BaaS rules
-# DEBT-01 (Supabase RLS / Firebase rules, static) was DISCARDED on 2026-11-22: precision 0.60 on the
-# sealed corpus. See docs/vibe-debt-next-step.md. The opt-in network probe DEBT-N1 is separate.
+# DEBT-01 v1 was DISCARDED on 2026-11-22 at precision 0.60: its false positives were public-read rules on
+# catalogs meant to be public. v2 reports only what lets anyone WRITE, or exposes every row of a table:
+# a table the browser can reach with RLS never enabled, a write/all policy that is `true`, a write grant
+# to anon, and Firebase write rules with no condition. Reading public data is a design question it leaves alone.
+
+SQL_CREATE = re.compile(r"create\s+table\s+(?:if\s+not\s+exists\s+)?(?:(public)\.|\"?([a-z_]+)\"?\.)?\"?([a-z_][a-z0-9_]*)\"?", re.I)
+SQL_RLS = re.compile(r"alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(?:\"?public\"?\.)?\"?([a-z_][a-z0-9_]*)\"?\s+enable\s+row\s+level\s+security", re.I)
+SQL_POLICY = re.compile(r"create\s+policy\s+[\"']?([^\"'\n]+?)[\"']?\s+on\s+(?:\"?public\"?\.)?\"?([a-z_][a-z0-9_]*)\"?(?P<body>[^;]*);", re.I | re.S)
+SQL_GRANT_ANON = re.compile(r"grant\s+(?:all|insert|update|delete)[^;]*\bon\s+(?:table\s+)?[^;]*\bto\s+[^;]*\banon\b", re.I)
+
+
+def probe_sql(rel: str, text: str, out: List[dict], rls_tables: set, created: Dict[str, Tuple[str, int]]) -> None:
+    for m in SQL_CREATE.finditer(text):
+        if comment_line(text, m.start()):
+            continue
+        schema = (m.group(1) or m.group(2) or "public").lower()
+        if schema == "public":
+            created.setdefault(m.group(3).lower(), (rel, line_of(text, m.start())))
+    for m in SQL_RLS.finditer(text):
+        rls_tables.add(m.group(1).lower())
+    for m in SQL_POLICY.finditer(text):
+        body = m.group("body").lower()
+        cmd = re.search(r"\bfor\s+(select|insert|update|delete|all)\b", body)
+        what = cmd.group(1) if cmd else "all"
+        if what == "select":
+            continue
+        if not re.search(r"(?:using|with\s+check)\s*\(\s*true\s*\)", body):
+            continue
+        if re.search(r"\bto\s+(service_role|postgres|supabase_admin)\b", body):
+            continue
+        out.append(finding("DEBT-01", "high", rel, line_of(text, m.start()),
+                           f"policy '{m.group(1).strip()[:40]}' on {m.group(2)} lets {what.upper()} touch any row (true)",
+                           f"policy:{m.group(2)}:{m.group(1).strip()}"))
+    for m in SQL_GRANT_ANON.finditer(text):
+        out.append(finding("DEBT-01", "high", rel, line_of(text, m.start()),
+                           "write privilege granted to the anon role", f"grant:{m.group(0)[:60]}"))
+
+
+FB_WRITE_OPEN = [
+    (re.compile(r"allow\s+[^:;]*\b(?:write|create|update|delete)\b[^:;]*:\s*if\s+true\s*;", re.I), "if true"),
+    (re.compile(r"allow\s+[^:;]*\b(?:write|create|update|delete)\b[^:;]*;", re.I), "no condition"),
+    (re.compile(r"allow\s+[^:;]*\b(?:write|create|update|delete)\b[^:;]*:\s*if\s+request\.time\s*<\s*timestamp", re.I), "test-mode expiry"),
+]
+
+
+def probe_firebase(rel: str, text: str, out: List[dict]) -> None:
+    name = Path(rel).name.lower()
+    if name.endswith(".rules"):
+        hit = set()
+        for rx, why in FB_WRITE_OPEN:
+            for m in rx.finditer(text):
+                ln = line_of(text, m.start())
+                if comment_line(text, m.start()) or ln in hit:
+                    continue
+                hit.add(ln)
+                out.append(finding("DEBT-01", "high", rel, ln, f"Firebase rule lets anyone write ({why})", f"fb:{ln}:{why}"))
+    if name == "database.rules.json":
+        for m in re.finditer(r"\"\.write\"\s*:\s*(true|\"true\")", text):
+            out.append(finding("DEBT-01", "high", rel, line_of(text, m.start()),
+                               "Realtime Database rule \".write\": true", f"rtdb:{line_of(text, m.start())}"))
+
 
 # --------------------------------------------------------------------------- code patterns
 
@@ -485,7 +551,9 @@ def scan(root: Path) -> Tuple[List[dict], Dict[str, str]]:
     ctx = Ctx(root)
     out: List[dict] = []
     ran = set()
-    saw = {"agent": False}
+    rls_tables: set = set()
+    created: Dict[str, Tuple[str, int]] = {}
+    saw = {"sql": False, "fb": False, "agent": False, "supabase": False}
     ignored = ignored_files(root)
     for fp in iter_files(root):
         rel = ctx.rel(fp)
@@ -495,15 +563,32 @@ def scan(root: Path) -> Tuple[List[dict], Dict[str, str]]:
             text = fp.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        if not saw["supabase"] and re.search(r"supabase", text, re.I):
+            saw["supabase"] = True
         probe_secrets(ctx, rel, text, out)
         probe_code(rel, text, out)
+        if fp.suffix.lower() == ".sql":
+            saw["sql"] = True
+            probe_sql(rel, text, out, rls_tables, created)
+        if fp.name.lower().endswith(".rules") or fp.name.lower() == "database.rules.json":
+            saw["fb"] = True
+            probe_firebase(rel, text, out)
         if AGENT_CONFIG.search(rel):
             saw["agent"] = True
             probe_agent_config(rel, text, out)
+    for table, (rel, line) in sorted(created.items()):
+        # RLS is how Supabase lets the browser reach the database; a server-side Postgres or SQLite
+        # schema has no such door and no such debt
+        if saw["supabase"] and table not in rls_tables:
+            out.append(finding("DEBT-01", "high", rel, line,
+                               f"public table '{table}' in a Supabase project and row level security is never enabled",
+                               f"norls:{table}"))
     probe_deps(ctx, out, ran)
     coverage = {}
     for cls in CLASSES:
         coverage[cls] = "ran"
+    if not (saw["sql"] or saw["fb"]):
+        coverage["DEBT-01"] = "no input (no SQL migrations, no Firebase rules)"
     if not saw["agent"]:
         coverage["DEBT-08"] = "no input (no agent configuration file)"
     if "DEBT-09" not in ran:
