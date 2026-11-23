@@ -146,8 +146,11 @@ scripts/gates/gate-reproduction.sh            # the same, as a gate
 
 Exit codes are the project's: `0` measured and consistent, `1` measured and contradictory,
 `2` could not measure — which is never a pass. That last one is load-bearing here rather
-than decorative. CPython made `data` the default tarfile extraction filter in 3.14; on
-such an interpreter the traversal is stopped by the runtime and not by the code, so the
-probe answers `2` rather than reporting a defect somebody fixed. The harness shipped a
+than decorative. CPython made `data` the default tarfile extraction filter in 3.14, while
+the signature of `extractall` still reads `filter=None`; read from the signature alone,
+the runtime's block looked like the code refusing the entry, and from 3.14 on every runner
+the gate reported a contradiction nobody had introduced. P-06 now pins the class-level
+fallback to the pre-3.14 behaviour for the duration of the call, so the code under test is
+measured and not the interpreter, and answers `2` only when even that cannot be done. The harness shipped a
 second instance of the same mistake and its own battery caught it: a patch that failed to
 apply was recorded as a note and the run still signed a `0`.
