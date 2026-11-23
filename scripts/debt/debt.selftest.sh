@@ -123,6 +123,57 @@ printf '%s' "$SOUT" | python3 -c "import json,sys;d=json.load(sys.stdin)['findin
   && ok "v3 decoys stay silent (public env URL/model, Firebase apiKey, UI random, constant-table SQL, Random.secure, TLS 1.2, AES/GCM)" \
   || bad "v3 decoys stay silent" "$(printf '%s' "$SOUT" | python3 -c "import json,sys;[print(x['class'],x['file'],x['evidence']) for x in json.load(sys.stdin)['findings']]")"
 
+# K3 for every v3 rule that never fired on corpus 3: a vulnerable file and a safe twin, one rule each.
+python3 - "$W/k3" <<'PY3'
+import sys, json
+from pathlib import Path
+w = Path(sys.argv[1])
+TG = "62151413" + "75:AA" + "Qx7" * 10 + "Zk"          # telegram-shaped, 34 chars after the colon, assembled
+OK = "sk" + "-proj-" + "Z9q" * 9
+cases = [
+ ("tg", "DEBT-03", "bot.py", f'TOKEN = "{TG}"\n', 'import os\nTOKEN = os.environ["TELEGRAM_TOKEN"]\n', None),
+ ("flutter", "DEBT-02", "lib/ia.dart", f"const k = '{OK}';\n", "const k = String.fromEnvironment('IA_URL');\n", ("pubspec.yaml", "name: a\n")),
+ ("dartconv", "DEBT-04", "lib/auth.dart", "final h = sha256.convert(utf8.encode(clave));\n", "final h = sha256.convert(utf8.encode(contenido));\n", None),
+ ("phphash", "DEBT-04", "Auth.php", "<?php $h = hash('sha256', $password);\n", "<?php $h = password_hash($password, PASSWORD_ARGON2ID);\n", None),
+ ("rubydig", "DEBT-04", "user.rb", "self.digest = Digest::SHA256.hexdigest(password)\n", "self.digest = BCrypt::Password.create(password)\n", None),
+ ("swifthash", "DEBT-04", "Auth.swift", "let h = SHA256.hash(data: Data(password.utf8))\n", "let h = SHA256.hash(data: fileData)\n", None),
+ ("javadig", "DEBT-04", "A.java", "byte[] h = md.digest(password.getBytes(UTF_8));\n", "byte[] h = md.digest(fileBytes);\n", None),
+ ("rbjwt", "DEBT-05", "auth.rb", "payload = JWT.decode(token, nil, false)\n", "payload = JWT.decode(token, key, true, algorithm: 'HS256')\n", None),
+ ("josejwt", "DEBT-05", "auth.js", "const c = decodeJwt(token);\n", "const { payload } = await jwtVerify(token, key);\n", None),
+ ("dartiv", "DEBT-07", "lib/c.dart", "final iv = IV.fromUtf8('0123456789abcdef');\n", "final iv = IV.fromSecureRandom(16);\n", None),
+ ("pyiv", "DEBT-07", "c.py", "_iv = b'0123456789abcdef'\n", "_iv = os.urandom(16)\n", None),
+ ("javaiv", "DEBT-07", "C.java", 'IvParameterSpec s = new IvParameterSpec("abcdefghijklmnop".getBytes());\n', "IvParameterSpec s = new IvParameterSpec(ivBytes);\n", None),
+ ("goiv", "DEBT-07", "c.go", 'iv := []byte("abcdefghijklmnop")\n', "iv := make([]byte, 16)\n", None),
+ ("phpecb", "DEBT-07", "c.php", "<?php $c = openssl_encrypt($d, 'aes-256-ecb', $k);\n", "<?php $c = openssl_encrypt($d, 'aes-256-gcm', $k, 0, $iv, $tag);\n", None),
+ ("corstrue", "DEBT-10", "server.js", "app.use(cors({ origin: true, credentials: true }));\n", "app.use(cors({ origin: ['https://app.example.com'], credentials: true }));\n", None),
+ ("gincors", "DEBT-10", "main.go", "r.Use(cors.New(cors.Config{AllowAllOrigins: true, AllowCredentials: true}))\n", 'r.Use(cors.New(cors.Config{AllowOrigins: []string{"https://app.example.com"}, AllowCredentials: true}))\n', None),
+ ("springcors", "DEBT-10", "Api.java", '@CrossOrigin(origins = "*", allowCredentials = "true")\n', '@CrossOrigin(origins = "https://app.example.com")\n', None),
+ ("curl", "DEBT-12", "http.php", "<?php curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);\n", "<?php curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);\n", None),
+ ("rbtls", "DEBT-12", "http.rb", "http.verify_mode = OpenSSL::SSL::VERIFY_NONE\n", "http.verify_mode = OpenSSL::SSL::VERIFY_PEER\n", None),
+ ("deno", "DEBT-12", "run.sh", "deno run --unsafely-ignore-certificate-errors main.ts\n", "deno run --allow-net main.ts\n", None),
+ ("phpsql", "DEBT-13", "q.php", "<?php $r = $db->query(\"SELECT * FROM users WHERE name = '$name'\");\n", "<?php $r = $db->prepare(\"SELECT * FROM users WHERE name = ?\");\n", None),
+ ("jssql", "DEBT-13", "q.js", "const r = await db.query(`SELECT * FROM citas WHERE id = ${req.query.id}`);\n", "const r = await db.query(`SELECT * FROM ${TABLA} WHERE id = $1`, [id]);\n", None),
+]
+manifest = []
+for name, cls, f, vuln, safe, extra in cases:
+    for kind, body in (("vuln", vuln), ("safe", safe)):
+        d = w / name / kind
+        (d / f).parent.mkdir(parents=True, exist_ok=True)
+        (d / f).write_text(body)
+        if extra:
+            (d / extra[0]).write_text(extra[1])
+    manifest.append(f"{name}:{cls}")
+(w / "manifest.txt").write_text("\n".join(manifest) + "\n")
+PY3
+while IFS= read -r pair; do
+  [ -z "$pair" ] && continue
+  n="${pair%%:*}"; c="${pair##*:}"
+  fv="$({ "$DEBT" scan "$W/k3/$n/vuln" --format json 2>/dev/null || true; } | python3 -c "import json,sys;print(sum(f['class']=='$c' for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
+  fs="$({ "$DEBT" scan "$W/k3/$n/safe" --format json 2>/dev/null || true; } | python3 -c "import json,sys;print(sum(f['class']=='$c' and f['severity']!='low' for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
+  { [ "$fv" != ERR ] && [ "$fv" -ge 1 ] && [ "$fs" = 0 ]; } && ok "K3 $c [$n] fires on the vulnerable file, silent on the twin" \
+    || bad "K3 $c [$n] vulnerable=$fv safe=$fs"
+done < "$W/k3/manifest.txt"
+
 # K4: no planted value in any output, text or json
 leak=0
 while IFS= read -r sec; do

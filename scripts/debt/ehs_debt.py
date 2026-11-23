@@ -479,8 +479,9 @@ V3_PROBES: List[Tuple[str, str, re.Pattern, str]] = [
     ("DEBT-04", "high", _rx(r"\b(SHA256|SHA512|Insecure\.MD5|Insecure\.SHA1)\.hash\(\s*data:\s*[^)]*" + PWD), "fast hash applied to a password"),
     ("DEBT-04", "high", _rx(r"\.digest\(\s*" + PWD + r"[^)]*getBytes"), "fast hash applied to a password (MessageDigest)"),
     # DEBT-05 v3
-    ("DEBT-05", "high", _rx(r"\bjwt\.ParseUnverified\(|\bparseClaimsJwt\(|\bparseUnsecuredClaims\(|\bdecodeJwt\(", 0), "JWT read without verifying its signature"),
+    ("DEBT-05", "high", _rx(r"\bparseClaimsJwt\(|\bparseUnsecuredClaims\(|\bdecodeJwt\(", 0), "JWT read without verifying its signature"),
     ("DEBT-05", "high", _rx(r"JWT\.decode\([^)]*,\s*nil\s*,\s*false"), "JWT decoded with verification off"),
+    # (DEBT-05 v3 "jwt.ParseUnverified" was DISCARDED on 2026-11-22: the real API is a method, it failed K3)
     # DEBT-07 v3
     ("DEBT-07", "high", _rx(r"\bIV\.from(?:Utf8|Base64)\(\s*['\"]", 0), "fixed IV literal"),
     ("DEBT-07", "high", _rx(r"(?<![A-Za-z0-9])_iv\s*=\s*(?:b?['\"][^'\"]{8,}['\"]|Buffer\.from\(\s*['\"])"), "fixed IV literal"),
@@ -498,7 +499,7 @@ V3_PROBES: List[Tuple[str, str, re.Pattern, str]] = [
     ("DEBT-12", "high", _rx(r"CURLOPT_SSL_VERIFY(?:PEER|HOST)\s*,\s*(?:false|0)\b", re.I), "cURL with certificate verification off"),
     ("DEBT-12", "high", _rx(r"VERIFY_NONE\b", 0), "TLS verification disabled"),
     ("DEBT-12", "high", _rx(r"checkServerTrusted\([^)]*\)\s*(?:\{\s*\}|\{\s*//[^\n]*\n\s*\})", 0), "TrustManager that trusts every certificate"),
-    ("DEBT-12", "high", _rx(r"hostnameVerifier\s*(?:=|\{)\s*(?:\{\s*_\s*,\s*_\s*->\s*true|HostnameVerifier\s*\{\s*_\s*,\s*_\s*->\s*true)|setHostnameVerifier\([^)]*->\s*true", 0), "hostname verification disabled"),
+    # (DEBT-12 v3 "hostnameVerifier always true" was DISCARDED on 2026-11-22: it failed its own fixture, K3)
     ("DEBT-12", "high", _rx(r"unsafely-ignore-certificate-errors", 0), "TLS verification disabled for the runtime"),
 ]
 
@@ -560,13 +561,8 @@ def probe_v3(rel: str, text: str, out: List[dict]) -> None:
             if name:
                 out.append(finding("DEBT-06", "medium", rel, line_of(text, m.start()),
                                    f"non-cryptographic random used for '{name}'", f"rand:{name}:{m.group(0)}", "v3"))
-    # DEBT-10 v3: manual headers that allow any or the reflected origin together with credentials
-    if re.search(r"Access-Control-Allow-Credentials['\"]?\s*[,:=]\s*['\"]?true", text, re.I):
-        m = re.search(r"Access-Control-Allow-Origin['\"]?\s*[,:=]\s*(?:['\"]\*['\"]|[^\n;]*\b(?:req|request|r|ctx|c)\b[^\n;]*origin)",
-                      text, re.I)
-        if m and not comment_line(text, m.start()):
-            out.append(finding("DEBT-10", "medium", rel, line_of(text, m.start()),
-                               "CORS headers allow any or the reflected origin together with credentials", "cors-manual", "v3"))
+    # DEBT-10 v3 "manual CORS headers" was REVERTED on 2026-11-22: on corpus 3 it fired on a clean control
+    # (a public branch answering `*` without credentials) and missed both real cases (origin in a variable).
     # DEBT-11 v3: identifiers ending in a credential word, more log calls and interpolation forms
     for m in LOG_V3.finditer(text):
         if comment_line(text, m.start()):
