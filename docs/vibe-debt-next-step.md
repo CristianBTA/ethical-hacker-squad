@@ -85,7 +85,7 @@ Built: `scripts/debt/ehs_debt.py` (`scripts/ehs debt scan|status|init`), proposa
 
 ### Method
 
-Three rounds. Before each one the keep rules were written down and the probes frozen in a commit, and only then was the corpus opened:
+Three rounds. Before each one the keep rules were written down and the probes frozen in a commit, and only then was the corpus opened. The freeze commits below are the originals, kept reachable by the tag `measure/debt-rounds-2026-11-22`; the branch that was merged carries the same content rebased:
 
 | Round | Frozen at | Corpus | Written by |
 |---|---|---|---|
