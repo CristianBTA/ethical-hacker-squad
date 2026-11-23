@@ -148,6 +148,18 @@ Use ethical-hacker-squad on the chatbot, focusing on prompt injection, tool auth
 
 Every finding comes back with an ID, the procedure that produced it, status (confirmed / probable / hardening / discarded), severity, confidence, location, redacted evidence, impact, recommended fix, verification method and standard traceability.
 
+### Keep the debt found, and know when it comes back
+
+```
+scripts/ehs debt scan ./my-app              # deterministic probes, no model, nothing sent anywhere
+scripts/ehs debt scan ./my-app --ledger     # record it in ./my-app/.ehs/debt.json
+scripts/ehs debt status ./my-app            # open, closed, regression_detected, and what could not be checked
+```
+
+Small static probes for the debt AI-assisted apps leave most often (BaaS rules that let anyone write, provider secrets in server or client code, fast password hashes, unverified JWTs, weak randomness for codes, broken encryption, agent/MCP configs, unlocked dependencies, debug and CORS, credentials in logs, TLS verification off, SQL built from interpolated values). Each probe was kept only if it cleared a precision bar fixed before measuring, judged blind on corpora written by agents that never saw the probes; four first versions were discarded and three later rules dropped on the way. The numbers, the discards and what the probes miss are in [`docs/vibe-debt-next-step.md`](docs/vibe-debt-next-step.md). `closed` means the probe no longer sees it, never that it is verified fixed.
+
+It audits only a local checkout you own, never prints a secret or a row of data, and its one network probe needs an ownership attestation: see [`docs/acceptable-use.md`](docs/acceptable-use.md).
+
 ## How it stays current
 
 Security knowledge decays. A daily deterministic job checks the pinned sources and opens an issue when something moves; a weekly job reviews a rotating slice of the corpus and opens a narrow pull request. Both read only from an allowlist, attach provenance to every item, and are structurally unable to modify the safety contract, the manifest, the allowlist or the workflows.
