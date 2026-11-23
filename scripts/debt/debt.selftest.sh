@@ -52,13 +52,19 @@ put(f"{v}/api/auth.py",
     "reset_token = random.randint(100000, 999999)\n"
     "r = requests.get(URL, verify=False)\n"
     "tok = jwt.encode({'a': 1}, 'secret', algorithm='HS256')\n"
-    "cur.execute(f\"SELECT * FROM users WHERE id = {uid}\")\n"
+    "cur.execute(f\"SELECT * FROM users WHERE name = '{q}'\")\n"
     "print('login', password)\n"
     "app.run(debug=True)\n")
 put(f"{v}/api/crypto.js", "const c = crypto.createCipher('aes-256-cbc', key);\nconst t = jwt.decode(token);\n")
 put(f"{v}/.mcp.json", json.dumps({"mcpServers": {"db": {"command": "npx", "args": ["-y", "some-mcp"],
                                   "env": {"DB_TOKEN": SK}}}}))
 put(f"{v}/package.json", json.dumps({"dependencies": {"left-pad": "*"}}))
+# v3 rules in other stacks
+put(f"{v}/mobile/pubspec.yaml", "name: app\n")
+put(f"{v}/mobile/lib/otp.dart", "import 'dart:math';\nString generarCodigo() {\n  final rnd = Random();\n  return (100000 + rnd.nextInt(900000)).toString();\n}\n")
+put(f"{v}/svc/main.go", "package main\nimport \"crypto/tls\"\nvar c = &tls.Config{InsecureSkipVerify: true}\n")
+put(f"{v}/svc/Crypto.java", "class C { void f() throws Exception { Cipher c = Cipher.getInstance(\"AES\"); } }\n")
+put(f"{v}/web/src/session.js", "export async function entrar(user) {\n  const idToken = await user.getIdToken();\n  console.log('sesion', user.email, idToken);\n}\n")
 # --- safe twin: same shapes, done right
 s = "safe"
 put(f"{s}/web/src/main.js", f"const client = createClient(import.meta.env.VITE_SUPABASE_URL, '{AN}');\n")
@@ -85,19 +91,37 @@ put(f"{s}/package.json", json.dumps({"dependencies": {"left-pad": "1.3.0"}}))
 put(f"{s}/package-lock.json", "{}")
 put(f"{s}/.gitignore", ".env\n")
 put(f"{s}/.env", f"OPENAI_API_KEY={SK}\n")   # ignored by .gitignore: the right practice, not debt
+# v3 decoys: safe code that looks like the rules above
+put(f"{s}/web/src/config.js", "export const base = import.meta.env.VITE_OPENAI_BASE_URL;\nexport const model = import.meta.env.VITE_OPENAI_MODEL;\n"
+    "const fb = { apiKey: 'AIzaSyD' + 'x'.repeat(32) };\nconst color = Math.random() > 0.5 ? 'red' : 'blue';\nconsole.log('token refreshed');\n")
+put(f"{s}/api/repo.py", "TABLA = 'users'\ncur.execute(f\"SELECT * FROM {TABLA} WHERE id = ?\", (uid,))\n")
+put(f"{s}/mobile/pubspec.yaml", "name: app\n")
+put(f"{s}/mobile/lib/otp.dart", "import 'dart:math';\nString generarCodigo() {\n  final rnd = Random.secure();\n  return (100000 + rnd.nextInt(900000)).toString();\n}\n")
+put(f"{s}/svc/main.go", "package main\nimport \"crypto/tls\"\nvar c = &tls.Config{MinVersion: tls.VersionTLS12}\n")
+put(f"{s}/svc/Crypto.java", "class C { void f() throws Exception { Cipher c = Cipher.getInstance(\"AES/GCM/NoPadding\"); } }\n")
 PY
 
 echo "=== self-test: ehs debt ==="
 VOUT="$("$DEBT" scan "$W/vuln" --format json 2>&1)"; vrc=$?
 SOUT="$("$DEBT" scan "$W/safe" --format json 2>&1)"; src=$?
 [ "$vrc" -eq 1 ] && ok "vulnerable app exits 1" || bad "vulnerable app exits 1 (rc=$vrc)" "$VOUT"
-for c in DEBT-01 DEBT-03 DEBT-04 DEBT-05 DEBT-06 DEBT-07 DEBT-08 DEBT-09 DEBT-10 DEBT-11 DEBT-12; do
+for c in DEBT-01 DEBT-02 DEBT-03 DEBT-04 DEBT-05 DEBT-06 DEBT-07 DEBT-08 DEBT-09 DEBT-10 DEBT-11 DEBT-12 DEBT-13; do
   n="$(printf '%s' "$VOUT" | python3 -c "import json,sys;print(sum(f['class']=='$c' for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
   m="$(printf '%s' "$SOUT" | python3 -c "import json,sys;print(sum(f['class']=='$c' and f['severity']!='low' for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
   [ "$n" != ERR ] && [ "$n" -ge 1 ] && ok "$c fires on the vulnerable fixture ($n)" || bad "$c fires on the vulnerable fixture ($n)"
   [ "$m" = 0 ] && ok "$c silent (>= medium) on the safe twin" || bad "$c silent (>= medium) on the safe twin ($m)" "$(printf '%s' "$SOUT" | grep -A3 "\"$c\"")"
 done
 [ "$src" -eq 0 ] && ok "safe twin exits 0" || bad "safe twin exits 0 (rc=$src)"
+
+# v3 rules fire on their stacks and stay quiet on the safe twins
+for pair in "lib/otp.dart:DEBT-06" "svc/main.go:DEBT-12" "svc/Crypto.java:DEBT-07" "web/src/session.js:DEBT-11"; do
+  f="${pair%%:*}"; c="${pair##*:}"
+  printf '%s' "$VOUT" | python3 -c "import json,sys;sys.exit(0 if any(x['class']=='$c' and x['file'].endswith('$f') for x in json.load(sys.stdin)['findings']) else 1)" \
+    && ok "v3 $c fires on $f" || bad "v3 $c fires on $f"
+done
+printf '%s' "$SOUT" | python3 -c "import json,sys;d=json.load(sys.stdin)['findings'];bad=[x for x in d if x['file'].endswith(('config.js','repo.py','otp.dart','main.go','Crypto.java'))];print(bad);sys.exit(1 if bad else 0)" >/dev/null \
+  && ok "v3 decoys stay silent (public env URL/model, Firebase apiKey, UI random, constant-table SQL, Random.secure, TLS 1.2, AES/GCM)" \
+  || bad "v3 decoys stay silent" "$(printf '%s' "$SOUT" | python3 -c "import json,sys;[print(x['class'],x['file'],x['evidence']) for x in json.load(sys.stdin)['findings']]")"
 
 # K4: no planted value in any output, text or json
 leak=0
@@ -118,9 +142,9 @@ ln -s /etc "$W/vuln/escape" 2>/dev/null
 "$DEBT" scan "$W/vuln" --format json 2>/dev/null | grep -q '"file": "escape/' \
   && bad "a symlink out of the target was followed" || ok "a symlink out of the target is not followed"
 
-# discarded probes stay discarded (2026-11-22): DEBT-13 never; DEBT-01 v2 never reports public reads;
-# DEBT-03 v2 never reports a generic name=literal assignment
-gone="$(printf '%s' "$VOUT" | python3 -c "import json,sys;print(sum(f['class'] in ('DEBT-13','DEBT-02') or (f['class']=='DEBT-03' and f['evidence'].startswith('literal assigned')) for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
+# discarded behaviour stays discarded (2026-11-22): no generic name=literal secret (DEBT-02 v1, DEBT-03 v1),
+# no public read (DEBT-01 v1), no constant-identifier SQL (DEBT-13 v1)
+gone="$(printf '%s' "$VOUT" | python3 -c "import json,sys;print(sum(f['evidence'].startswith('literal assigned') for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
 [ "$gone" = 0 ] && ok "discarded probe behaviour emits nothing" || bad "discarded probe behaviour emits nothing ($gone)"
 PR="$W/pubread"; mkdir -p "$PR/fb"; printf 'service cloud.firestore {\n match /cat/{d} { allow read: if true; allow write: if request.auth != null; }\n}\n' > "$PR/fb/firestore.rules"
 "$DEBT" scan "$PR" --format json 2>/dev/null | python3 -c "import json,sys;sys.exit(0 if any(f['class']=='DEBT-01' for f in json.load(sys.stdin)['findings']) else 1)" && bad "DEBT-01 v2 reports a public read" || ok "DEBT-01 v2 leaves a public read alone"

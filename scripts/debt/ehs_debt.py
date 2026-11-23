@@ -75,6 +75,7 @@ TEXT_EXT = {
     ".html", ".htm", ".json", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".env",
     ".sql", ".rules", ".gs", ".php", ".rb", ".go", ".java", ".kt", ".swift",
     ".dart", ".cs", ".sh", ".txt", ".md", ".conf", ".properties", ".xml",
+    ".key", ".pem", ".kts", ".gradle", ".erb", ".plist",
 }
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_FILES = 20000
@@ -83,6 +84,7 @@ MAX_FILES = 20000
 CLASSES = {
     "DEBT-01": ("BaaS lets anyone write, or every row is exposed (Supabase RLS, Firebase rules) - v2", "WEB-04"),
     "DEBT-03": ("Provider secret hard-coded in server-side source - v2", "SUP-16"),
+    "DEBT-02": ("Provider secret reachable from client-side or mobile code - v2", "MOB-12"),
     "DEBT-04": ("Password stored with a fast hash or in clear", "WEB-19"),
     "DEBT-05": ("JWT accepted without real verification, or signed with a guessable secret", "WEB-01"),
     "DEBT-06": ("Security token generated with a non-cryptographic random", "WEB-19"),
@@ -92,6 +94,7 @@ CLASSES = {
     "DEBT-10": ("Debug mode or wildcard CORS with credentials", "WEB-16"),
     "DEBT-11": ("Credentials or tokens written to logs", "PRV-09"),
     "DEBT-12": ("TLS certificate verification turned off", "WEB-19"),
+    "DEBT-13": ("SQL built from a value interpolated into the query text - v2", "WEB-07"),
     "DEBT-N1": ("Supabase table readable with the public anon key (network, opt-in)", "WEB-04"),
 }
 
@@ -183,12 +186,30 @@ SECRET_NAME = re.compile(r"SERVICE_ROLE|SECRET|PRIVATE|PASSWORD|PASSWD|OPENAI|AN
                          r"BOT_TOKEN|ACCESS_TOKEN|AUTH_TOKEN|GEMINI_API_KEY|GOOGLE_API_KEY_SERVER")
 
 
+SECRET_SUFFIX = re.compile(r"(SECRET|SECRET_KEY|PRIVATE_KEY|SERVICE_ROLE|SERVICE_ROLE_KEY|SERVICE_KEY|PASSWORD|"
+                           r"API_KEY|APIKEY|ACCESS_KEY|ACCESS_TOKEN|AUTH_TOKEN|BOT_TOKEN|TOKEN|ADMIN_KEY|MASTER_KEY)$")
+PUBLIC_BY_DESIGN = re.compile(r"ANON|PUBLISHABLE|PUBLIC_KEY|SITE_KEY|FIREBASE|MAPS|MEASUREMENT|RECAPTCHA|"
+                              r"ALGOLIA_SEARCH|MAPBOX|SENTRY_DSN|POSTHOG|CLIENT_ID")
+
+
 class Ctx:
     def __init__(self, root: Path):
         self.root = root
         self.rel_cache: Dict[Path, str] = {}
         self.is_extension = any((root / d / "manifest.json").exists() for d in ("", "extension", "src"))
         self.vite = any((root / n).exists() for n in ("vite.config.js", "vite.config.ts", "vite.config.mjs"))
+        # v3: a mobile app ships its code to the device, so its source is client code
+        self.flutter = (root / "pubspec.yaml").exists()
+        self.android = any(root.glob("**/AndroidManifest.xml"))
+        self.rn = False
+        pj = root / "package.json"
+        if pj.exists():
+            try:
+                deps = json.loads(pj.read_text(encoding="utf-8", errors="replace"))
+                alld = {**(deps.get("dependencies") or {}), **(deps.get("devDependencies") or {})}
+                self.rn = "react-native" in alld or "expo" in alld
+            except Exception:
+                pass
 
     def rel(self, p: Path) -> str:
         if p not in self.rel_cache:
@@ -210,13 +231,23 @@ class Ctx:
             return True
         if text.lstrip().startswith(("'use client'", '"use client"')):
             return True
+        suf = Path(rel).suffix.lower()
+        if self.flutter and low.startswith("lib/") and suf == ".dart":
+            return True
+        if self.android and "/src/main/" in low and suf in {".kt", ".java"}:
+            return True
+        if suf == ".swift":
+            return True
+        if self.rn and first in {"app", "src", "components", "screens", "hooks", "lib"} and suf in {".js", ".jsx", ".ts", ".tsx"}:
+            return True
         return False
 
 
 # --------------------------------------------------------------------------- findings
 
-def finding(cls: str, sev: str, rel: str, line: int, evidence: str, key: str) -> dict:
+def finding(cls: str, sev: str, rel: str, line: int, evidence: str, key: str, rule: str = "base") -> dict:
     return {
+        "rule": rule,
         "class": cls,
         "severity": sev,
         "file": rel,
@@ -247,6 +278,7 @@ PROVIDER_SECRETS = [
     ("github-token", re.compile(r"\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,})")),
     ("slack-token", re.compile(r"\b(xox[baprs]-[0-9A-Za-z\-]{10,})")),
     ("telegram-bot-token", re.compile(r"\b(\d{8,10}:AA[A-Za-z0-9_\-]{33})\b")),
+    ("telegram-bot-token~v3", re.compile(r"\b(\d{8,10}:AA[A-Za-z0-9_\-]{30,40})(?![A-Za-z0-9_\-])")),
     ("private-key", re.compile(r"(-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----)")),
     ("sendgrid-key", re.compile(r"\b(SG\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,})")),
 ]
@@ -280,10 +312,15 @@ def probe_secrets(ctx: Ctx, rel: str, text: str, out: List[dict]) -> None:
                 return
             cls, sev = "DEBT-03", "high"
         else:
-            return  # DEBT-02 (secret in client code) was DISCARDED on 2026-11-22: pooled precision 0.58
+            # DEBT-02 v2. v1 was DISCARDED on 2026-11-22 (pooled 0.58): it reported name=literal pairs and
+            # env names that merely mentioned a provider. v2 reports provider formats only.
+            if generic:
+                return
+            cls, sev = "DEBT-02", "high"
+        rule = "v3" if (kind.endswith("~v3") or cls == "DEBT-02") else "base"
         out.append(finding(cls, sev, rel, line_of(text, pos),
-                           f"{kind} {redact(value)}" + (" in client-side code" if client else ""),
-                           fingerprint(value)))
+                           f"{kind.replace('~v3', '')} {redact(value)}" + (" in client-side code" if client else ""),
+                           fingerprint(value), rule))
 
     for kind, rx in PROVIDER_SECRETS:
         for m in rx.finditer(text):
@@ -306,6 +343,19 @@ def probe_secrets(ctx: Ctx, rel: str, text: str, out: List[dict]) -> None:
         if "PUBLIC" in name.upper() or "ANON" in name.upper() or "PUBLISHABLE" in name.upper():
             continue
         add(f"literal assigned to {name}", value, m.start(2), generic=True)
+
+    # DEBT-02 v2: a public-prefixed env var whose name ENDS like a secret ships to every client.
+    if not is_test:
+        for m in PUBLIC_ENV.finditer(text):
+            name = m.group(2)
+            if SECRET_SUFFIX.search(name) and not PUBLIC_BY_DESIGN.search(name):
+                key = m.group(0)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(finding("DEBT-02", "high", rel, line_of(text, m.start()),
+                                   f"{key} is shipped to every client by its prefix and its name ends like a secret",
+                                   key, "v3"))
 
 
 
@@ -414,6 +464,145 @@ CODE_PROBES: List[Tuple[str, str, re.Pattern, str]] = [
 ]
 
 
+PWD = r"(?:\w*(?:password|passwd|pwd|contrase(?:n|ñ)a|clave))"
+SEC_WORDS = {"token", "otp", "codigo", "code", "reset", "session", "secret", "password", "clave", "contrasena",
+             "nonce", "salt", "pin", "verificacion", "verification", "recovery", "recuperacion", "apikey", "invite",
+             "invitacion", "magic"}
+SQL_LINE = re.compile(r"\b(select\s[^\n]*\sfrom|insert\s+into|update\s+\w+\s+set|delete\s+from)\b", re.I)
+
+V3_PROBES: List[Tuple[str, str, re.Pattern, str]] = [
+    # DEBT-04 v3: other stacks
+    ("DEBT-04", "high", _rx(r"\b(md5|sha1|sha256|sha512)\.convert\(\s*[^)]*" + PWD), "fast hash applied to a password"),
+    ("DEBT-04", "high", _rx(r"\bhash\(\s*['\"](md5|sha1|sha256|sha512)['\"]\s*,\s*[^)]*" + PWD), "fast hash applied to a password"),
+    ("DEBT-04", "high", _rx(r"\b(md5|sha1|sha256|sha512)\.Sum(?:256|512)?\(\s*\[\]byte\(\s*[^)]*" + PWD), "fast hash applied to a password"),
+    ("DEBT-04", "high", _rx(r"Digest::(MD5|SHA1|SHA256|SHA512)\.(hex)?digest\(\s*[^)]*" + PWD), "fast hash applied to a password"),
+    ("DEBT-04", "high", _rx(r"\b(SHA256|SHA512|Insecure\.MD5|Insecure\.SHA1)\.hash\(\s*data:\s*[^)]*" + PWD), "fast hash applied to a password"),
+    ("DEBT-04", "high", _rx(r"\.digest\(\s*" + PWD + r"[^)]*getBytes"), "fast hash applied to a password (MessageDigest)"),
+    # DEBT-05 v3
+    ("DEBT-05", "high", _rx(r"\bjwt\.ParseUnverified\(|\bparseClaimsJwt\(|\bparseUnsecuredClaims\(|\bdecodeJwt\(", 0), "JWT read without verifying its signature"),
+    ("DEBT-05", "high", _rx(r"JWT\.decode\([^)]*,\s*nil\s*,\s*false"), "JWT decoded with verification off"),
+    # DEBT-07 v3
+    ("DEBT-07", "high", _rx(r"\bIV\.from(?:Utf8|Base64)\(\s*['\"]", 0), "fixed IV literal"),
+    ("DEBT-07", "high", _rx(r"(?<![A-Za-z0-9])_iv\s*=\s*(?:b?['\"][^'\"]{8,}['\"]|Buffer\.from\(\s*['\"])"), "fixed IV literal"),
+    ("DEBT-07", "high", _rx(r"new\s+IvParameterSpec\(\s*(?:\"[^\"]*\"\.(?:getBytes|toByteArray)|new\s+byte\[)|IvParameterSpec\(\s*\"[^\"]*\"\.toByteArray", 0), "fixed or zero IV"),
+    ("DEBT-07", "high", _rx(r"Cipher\.getInstance\(\s*\"(AES|AES/ECB[^\"]*|DES[^\"]*|DESede[^\"]*|RC4|ARCFOUR)\"", 0), "cipher with ECB by default or a broken algorithm"),
+    ("DEBT-07", "high", _rx(r"\biv\s*:?=\s*\[\]byte\(\s*\"[^\"]{8,}\"", 0), "fixed IV literal"),
+    ("DEBT-07", "high", _rx(r"openssl_encrypt\([^)]*['\"](?:aes-\d+-ecb|des-[\w-]+|rc4)['\"]", re.I), "broken cipher mode or algorithm"),
+    # DEBT-10 v3
+    ("DEBT-10", "medium", _rx(r"origin\s*:\s*true[^}]{0,80}credentials\s*:\s*true|credentials\s*:\s*true[^}]{0,80}origin\s*:\s*true", re.I | re.S), "CORS reflects any origin with credentials"),
+    ("DEBT-10", "medium", _rx(r"AllowAllOrigins\s*:\s*true[^}]{0,200}AllowCredentials\s*:\s*true|AllowCredentials\s*:\s*true[^}]{0,200}AllowAllOrigins\s*:\s*true", re.S), "CORS any origin with credentials"),
+    ("DEBT-10", "medium", _rx(r"@CrossOrigin\([^)]*origins\s*=\s*\"\*\"[^)]*allowCredentials\s*=\s*\"true\"", 0), "CORS any origin with credentials"),
+    ("DEBT-10", "medium", _rx(r"^\s*APP_DEBUG\s*=\s*true\b", re.M | re.I), "APP_DEBUG=true committed"),
+    # DEBT-12 v3
+    ("DEBT-12", "high", _rx(r"InsecureSkipVerify\s*:\s*true", 0), "TLS client accepts any certificate"),
+    ("DEBT-12", "high", _rx(r"CURLOPT_SSL_VERIFY(?:PEER|HOST)\s*,\s*(?:false|0)\b", re.I), "cURL with certificate verification off"),
+    ("DEBT-12", "high", _rx(r"VERIFY_NONE\b", 0), "TLS verification disabled"),
+    ("DEBT-12", "high", _rx(r"checkServerTrusted\([^)]*\)\s*(?:\{\s*\}|\{\s*//[^\n]*\n\s*\})", 0), "TrustManager that trusts every certificate"),
+    ("DEBT-12", "high", _rx(r"hostnameVerifier\s*(?:=|\{)\s*(?:\{\s*_\s*,\s*_\s*->\s*true|HostnameVerifier\s*\{\s*_\s*,\s*_\s*->\s*true)|setHostnameVerifier\([^)]*->\s*true", 0), "hostname verification disabled"),
+    ("DEBT-12", "high", _rx(r"unsafely-ignore-certificate-errors", 0), "TLS verification disabled for the runtime"),
+]
+
+LOG_CALL = (r"(?:console\.(?:log|info|debug|warn|error)|\bprint|\bprintln|\bputs|\bNSLog|\berror_log|\bLog\.[dievw]|"
+            r"logger?\.(?:info|debug|warning|warn|error)|logging\.(?:info|debug|warning|error)|"
+            r"\blog\.(?:Print|Printf|Println|info|debug|warn|error)|fmt\.Print(?:f|ln)?|Rails\.logger\.\w+)")
+LOG_V3 = re.compile(LOG_CALL + r"\s*\([^)\n]*(?:[(,+{]|\$\{|#\{|\\\(|\.\s*\$)\s*\$?(?:\w+\.)*\w*"
+                    r"(?:password|passwd|contrasena|clave|token|api_?key|secret|authorization|card_?number|cvv)\b\s*[)}\],+.]",
+                    re.I)
+
+
+def _ident_parts(name: str) -> set:
+    parts = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower().replace("-", "_").split("_")
+    return {p for p in parts if p}
+
+
+def _security_context(text: str, pos: int) -> Optional[str]:
+    """The name a random value is for: the assignment target on its line, else the enclosing function."""
+    ls = text.rfind("\n", 0, pos) + 1
+    m = re.search(r"([A-Za-z_][\w]*)\s*(?::\s*\w+\s*)?(?::=|=)(?!=)", text[ls:pos])
+    if m and _ident_parts(m.group(1)) & SEC_WORDS:
+        return m.group(1)
+    head = text[max(0, pos - 2500):pos]
+    fns = list(re.finditer(r"(?:def|function|func|fun|fn)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(|"
+                           r"(?:String|int|Int|string|void|Future<\w+>|static\s+\w+)\s+([A-Za-z_]\w*)\s*\(|"
+                           r"(?:const|let|var|final)\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?\(", head))
+    if fns:
+        name = next(g for g in fns[-1].groups() if g)
+        if _ident_parts(name) & SEC_WORDS:
+            return name
+    return None
+
+
+def probe_v3(rel: str, text: str, out: List[dict]) -> None:
+    """v3 rules (2026-11-22): measured on corpus 3 only; a failing rule is reverted, never tuned."""
+    for cls, sev, rx, what in V3_PROBES:
+        for m in rx.finditer(text):
+            if comment_line(text, m.start()):
+                continue
+            out.append(finding(cls, sev, rel, line_of(text, m.start()), what,
+                               re.sub(r"\s+", " ", m.group(0))[:80], "v3"))
+    # DEBT-04 v3: MessageDigest MD5/SHA on a password is caught by the .digest rule above only if the
+    # algorithm is weak; nothing to add here.
+    # DEBT-06 v3: non-cryptographic random used for a value named for security
+    weak_rand = [r"Math\.random\(", r"\brandom\.(?:random|randint|choice|choices|randrange|sample)\(",
+                 r"\b(?:mt_)?rand\(\s*\d", r"\brandom_int\(\s*\d(?!.*random_bytes)"]
+    if re.search(r"\"math/rand\"", text):
+        weak_rand.append(r"\brand\.(?:Intn|Int63n|Int31n|Int63|Int)\(")
+    insecure_ctor = re.search(r"(?<!\.)(?<!Secure)\bRandom\(\s*\)|new\s+Random\(", text)
+    if insecure_ctor and not re.search(r"Random\.secure\(\)|SecureRandom", text):
+        weak_rand.append(r"\.next(?:Int|Long|Double)\(")
+    for pat in weak_rand:
+        if pat.startswith(r"\brandom_int"):
+            continue  # PHP random_int is a CSPRNG
+        for m in re.finditer(pat, text):
+            if comment_line(text, m.start()):
+                continue
+            name = _security_context(text, m.start())
+            if name:
+                out.append(finding("DEBT-06", "medium", rel, line_of(text, m.start()),
+                                   f"non-cryptographic random used for '{name}'", f"rand:{name}:{m.group(0)}", "v3"))
+    # DEBT-10 v3: manual headers that allow any or the reflected origin together with credentials
+    if re.search(r"Access-Control-Allow-Credentials['\"]?\s*[,:=]\s*['\"]?true", text, re.I):
+        m = re.search(r"Access-Control-Allow-Origin['\"]?\s*[,:=]\s*(?:['\"]\*['\"]|[^\n;]*\b(?:req|request|r|ctx|c)\b[^\n;]*origin)",
+                      text, re.I)
+        if m and not comment_line(text, m.start()):
+            out.append(finding("DEBT-10", "medium", rel, line_of(text, m.start()),
+                               "CORS headers allow any or the reflected origin together with credentials", "cors-manual", "v3"))
+    # DEBT-11 v3: identifiers ending in a credential word, more log calls and interpolation forms
+    for m in LOG_V3.finditer(text):
+        if comment_line(text, m.start()):
+            continue
+        out.append(finding("DEBT-11", "medium", rel, line_of(text, m.start()), "credential or token written to a log",
+                           re.sub(r"\s+", " ", m.group(0))[:80], "v3"))
+    # DEBT-05 v3: short literal JWT secrets assigned to a jwt/secret-key name (incl. typed and Go []byte)
+    for m in re.finditer(r"\b((?:jwt|token)_?(?:secret|key|signing_?key)\w*|secret_?key|SECRET_KEY|JWT_SECRET)\b"
+                         r"(?:\s*:\s*\w+)?\s*(?::=|=|:)\s*(?:\[\]byte\(\s*)?[\"']([^\"'\n]{0,19})[\"']", text, re.I):
+        if comment_line(text, m.start()) or PLACEHOLDER.search(m.group(2)) and m.group(2):
+            continue
+        ls = text.rfind("\n", 0, m.start()) + 1
+        le = text.find("\n", m.end())
+        if ENV_LOOKUP.search(text[ls: le if le != -1 else len(text)]) and "getenv(" not in text[ls:m.start()]:
+            continue
+        out.append(finding("DEBT-05", "high", rel, line_of(text, m.start()),
+                           f"JWT/session signing secret is a short literal: {redact(m.group(2)) if m.group(2) else 'empty'}",
+                           f"jwtlit:{m.group(1)}", "v3"))
+    # DEBT-13 v2: SQL whose interpolated value sits inside SQL quotes, or reads request input directly
+    for m in SQL_LINE.finditer(text):
+        ls = text.rfind("\n", 0, m.start()) + 1
+        le = text.find("\n", m.end())
+        line = text[ls: le if le != -1 else len(text)]
+        if comment_line(text, m.start()):
+            continue
+        quoted = re.search(r"'%?(?:\{|\$\{|#\{|\$[A-Za-z_])|'\"\s*(?:\+|\.)|'%[sdv]'[^\n]*(?:%\s*[\w(]|Sprintf|\.format\()|"
+                           r"Sprintf\([^\n]*'%[sdv]'", line)
+        request = re.search(r"(?:\{|\$\{|#\{|\+\s*|\.\s*)\s*(?:request\.(?:args|form|json|values|GET|POST|query_params)|"
+                            r"req\.(?:query|body|params)|params\[|\$_(?:GET|POST|REQUEST)|c\.Query\(|r\.URL\.Query\(|"
+                            r"r\.FormValue\()", line)
+        if quoted or request:
+            out.append(finding("DEBT-13", "high", rel, line_of(text, m.start()),
+                               "SQL built from a value interpolated into the query text",
+                               re.sub(r"\s+", " ", line.strip())[:80], "v3"))
+
+
 def probe_code(rel: str, text: str, out: List[dict]) -> None:
     if EXAMPLE_FILE.search(rel) or TEST_PATH.search(rel):
         return
@@ -433,6 +622,7 @@ def probe_code(rel: str, text: str, out: List[dict]) -> None:
                 evidence = what
             snippet = re.sub(r"\s+", " ", m.group(0))[:80]
             out.append(finding(cls, sev, rel, line_of(text, m.start()), evidence, snippet))
+    probe_v3(rel, text, out)
 
 
 # --------------------------------------------------------------------------- agent configuration
