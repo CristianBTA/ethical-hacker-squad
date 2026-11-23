@@ -82,7 +82,6 @@ MAX_FILES = 20000
 # Procedures in skills/ethical-hacker-squad/references/knowledge that explain each class.
 CLASSES = {
     "DEBT-01": ("BaaS lets anyone write, or every row is exposed (Supabase RLS, Firebase rules) - v2", "WEB-04"),
-    "DEBT-02": ("Secret reachable from client-side code", "MOB-12"),
     "DEBT-03": ("Provider secret hard-coded in server-side source - v2", "SUP-16"),
     "DEBT-04": ("Password stored with a fast hash or in clear", "WEB-19"),
     "DEBT-05": ("JWT accepted without real verification, or signed with a guessable secret", "WEB-01"),
@@ -281,7 +280,7 @@ def probe_secrets(ctx: Ctx, rel: str, text: str, out: List[dict]) -> None:
                 return
             cls, sev = "DEBT-03", "high"
         else:
-            cls, sev = "DEBT-02", "high"
+            return  # DEBT-02 (secret in client code) was DISCARDED on 2026-11-22: pooled precision 0.58
         out.append(finding(cls, sev, rel, line_of(text, pos),
                            f"{kind} {redact(value)}" + (" in client-side code" if client else ""),
                            fingerprint(value)))
@@ -308,17 +307,6 @@ def probe_secrets(ctx: Ctx, rel: str, text: str, out: List[dict]) -> None:
             continue
         add(f"literal assigned to {name}", value, m.start(2), generic=True)
 
-    # A public-prefixed env var whose NAME says it is a secret ships to every browser.
-    for m in PUBLIC_ENV.finditer(text):
-        name = m.group(2)
-        if SECRET_NAME.search(name) and not re.search(r"ANON|PUBLISHABLE|PUBLIC_KEY$", name):
-            key = m.group(0)
-            if key in seen or is_test:
-                continue
-            seen.add(key)
-            out.append(finding("DEBT-02", "high", rel, line_of(text, m.start()),
-                               f"{key} is exposed to the browser by its prefix and its name says it is a secret",
-                               key))
 
 
 # --------------------------------------------------------------------------- BaaS rules

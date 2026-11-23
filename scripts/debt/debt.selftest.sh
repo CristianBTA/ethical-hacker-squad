@@ -91,7 +91,7 @@ echo "=== self-test: ehs debt ==="
 VOUT="$("$DEBT" scan "$W/vuln" --format json 2>&1)"; vrc=$?
 SOUT="$("$DEBT" scan "$W/safe" --format json 2>&1)"; src=$?
 [ "$vrc" -eq 1 ] && ok "vulnerable app exits 1" || bad "vulnerable app exits 1 (rc=$vrc)" "$VOUT"
-for c in DEBT-01 DEBT-02 DEBT-03 DEBT-04 DEBT-05 DEBT-06 DEBT-07 DEBT-08 DEBT-09 DEBT-10 DEBT-11 DEBT-12; do
+for c in DEBT-01 DEBT-03 DEBT-04 DEBT-05 DEBT-06 DEBT-07 DEBT-08 DEBT-09 DEBT-10 DEBT-11 DEBT-12; do
   n="$(printf '%s' "$VOUT" | python3 -c "import json,sys;print(sum(f['class']=='$c' for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
   m="$(printf '%s' "$SOUT" | python3 -c "import json,sys;print(sum(f['class']=='$c' and f['severity']!='low' for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
   [ "$n" != ERR ] && [ "$n" -ge 1 ] && ok "$c fires on the vulnerable fixture ($n)" || bad "$c fires on the vulnerable fixture ($n)"
@@ -120,7 +120,7 @@ ln -s /etc "$W/vuln/escape" 2>/dev/null
 
 # discarded probes stay discarded (2026-11-22): DEBT-13 never; DEBT-01 v2 never reports public reads;
 # DEBT-03 v2 never reports a generic name=literal assignment
-gone="$(printf '%s' "$VOUT" | python3 -c "import json,sys;print(sum(f['class']=='DEBT-13' or (f['class']=='DEBT-03' and f['evidence'].startswith('literal assigned')) for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
+gone="$(printf '%s' "$VOUT" | python3 -c "import json,sys;print(sum(f['class'] in ('DEBT-13','DEBT-02') or (f['class']=='DEBT-03' and f['evidence'].startswith('literal assigned')) for f in json.load(sys.stdin)['findings']))" 2>/dev/null || echo ERR)"
 [ "$gone" = 0 ] && ok "discarded probe behaviour emits nothing" || bad "discarded probe behaviour emits nothing ($gone)"
 PR="$W/pubread"; mkdir -p "$PR/fb"; printf 'service cloud.firestore {\n match /cat/{d} { allow read: if true; allow write: if request.auth != null; }\n}\n' > "$PR/fb/firestore.rules"
 "$DEBT" scan "$PR" --format json 2>/dev/null | python3 -c "import json,sys;sys.exit(0 if any(f['class']=='DEBT-01' for f in json.load(sys.stdin)['findings']) else 1)" && bad "DEBT-01 v2 reports a public read" || ok "DEBT-01 v2 leaves a public read alone"
