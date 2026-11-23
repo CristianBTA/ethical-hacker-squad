@@ -179,7 +179,7 @@ leak=0
 while IFS= read -r sec; do
   [ -z "$sec" ] && continue
   for o in "$VOUT" "$("$DEBT" scan "$W/vuln" 2>&1)" "$SOUT"; do
-    printf '%s' "$o" | grep -qF -- "$sec" && leak=1
+    grep -qF -- "$sec" <<<"$o" && leak=1
   done
 done < "$W/planted.txt"
 [ "$leak" -eq 0 ] && ok "no planted secret value reaches the output" || bad "a planted secret value reached the output"
@@ -190,7 +190,8 @@ for t in "https://example.org/r.git" "git@example.org:o/r.git" "ssh://example.or
   [ "$rc" -eq 2 ] && ok "refuses target '$t'" || bad "refuses target '$t' (rc=$rc)"
 done
 ln -s /etc "$W/vuln/escape" 2>/dev/null
-"$DEBT" scan "$W/vuln" --format json 2>/dev/null | grep -q '"file": "escape/' \
+SYM="$("$DEBT" scan "$W/vuln" --format json 2>/dev/null || true)"
+grep -q '"file": "escape/' <<<"$SYM" \
   && bad "a symlink out of the target was followed" || ok "a symlink out of the target is not followed"
 
 # discarded behaviour stays discarded (2026-11-22): no generic name=literal secret (DEBT-02 v1, DEBT-03 v1),
@@ -243,9 +244,9 @@ PY
 SRV=$!; sleep 1
 "$DEBT" init "$N" --owner tester --host 127.0.0.1 --i-own-this >/dev/null 2>&1
 NOUT="$("$DEBT" scan "$N" --network 2>&1)"
-printf '%s' "$NOUT" | grep -q "DEBT-N1.*1 open" && ok "network probe reports an anonymous read" || bad "network probe reports an anonymous read" "$NOUT"
-printf '%s' "$NOUT" | grep -q "ROW-CONTENT-MARKER" && bad "network probe printed row content" || ok "network probe never prints row content"
-printf '%s' "$NOUT" | grep -qF -- "$AN" && bad "network probe printed the key" || ok "network probe never prints the key"
+grep -q "DEBT-N1.*1 open" <<<"$NOUT" && ok "network probe reports an anonymous read" || bad "network probe reports an anonymous read" "$NOUT"
+grep -q "ROW-CONTENT-MARKER" <<<"$NOUT" && bad "network probe printed row content" || ok "network probe never prints row content"
+grep -qF -- "$AN" <<<"$NOUT" && bad "network probe printed the key" || ok "network probe never prints the key"
 
 echo
 echo "$pass PASS / $fail FAIL"
